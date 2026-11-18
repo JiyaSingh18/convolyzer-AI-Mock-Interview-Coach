@@ -31,3 +31,5 @@ google-credentials.json
 # Runtime artifacts
 uploads/
 server/uploads/
+# Vercel
+.vercel

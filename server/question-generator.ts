@@ -1,13 +1,9 @@
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
-import dotenv from 'dotenv';
-import path from 'path';
-
-// Load environment variables from the server directory
-dotenv.config({ path: path.join(__dirname, '.env') });
+import { getGeminiApiKey, GEMINI_MODEL } from './env.js';
 
 // Get the API key from environment variables
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MODEL_NAME = "gemini-1.5-flash";
+const GEMINI_API_KEY = getGeminiApiKey();
+const MODEL_NAME = GEMINI_MODEL;
 
 // Default questions for fallback scenarios
 function createDefaultQuestions(topic: string, role: string, numQuestions: number = 3, mode: string = 'technical') {
@@ -162,7 +158,7 @@ async function generateSafely(generationFn: Function) {
  */
 export async function generateInterviewQuestions(topic: string, role: string, mode: string, numQuestions: number = 3) {
   console.log(`Using model: ${MODEL_NAME} with v1 API`);
-  console.log(`Using API key: ${GEMINI_API_KEY ? GEMINI_API_KEY.substring(0, 10) + '...' : 'none'}`);
+  console.log(`Gemini API key configured: ${GEMINI_API_KEY ? 'yes' : 'no'}`);
   console.log(`Generating ${numQuestions} questions for topic: ${topic}, role: ${role}, mode: ${mode}`);
   
   // Validate numQuestions
@@ -208,6 +204,7 @@ export async function generateInterviewQuestions(topic: string, role: string, mo
     // For technical mode, generate deep technical questions
     const isTechnicalMode = mode === 'technical' || mode === 'system_design';
     
+    // @ts-ignore -- currently unused, kept for future prompt tuning
     const technicalPromptInstructions = isTechnicalMode ? `
 CRITICAL: For technical interviews, generate DEEP, HANDS-ON technical questions that test:
 - Specific technical knowledge and implementation details
@@ -414,7 +411,7 @@ DO NOT include any explanations or text outside of the JSON structure.`;
           
           // Replace ALL bracket patterns - be very aggressive
           // First, replace [specific X] patterns
-          questionText = questionText.replace(/\[specific\s+([^\]]+)\]/gi, (match, p1) => {
+          questionText = questionText.replace(/\[specific\s+([^\]]+)\]/gi, (_match, p1) => {
             const content = p1.toLowerCase();
             
             // Kubernetes-specific replacements
@@ -466,7 +463,7 @@ DO NOT include any explanations or text outside of the JSON structure.`;
           });
           
           // Replace ALL other bracket patterns - catch everything
-          questionText = questionText.replace(/\[([^\]]+)\]/g, (match, p1) => {
+          questionText = questionText.replace(/\[([^\]]+)\]/g, (_match, p1) => {
             const content = p1.toLowerCase();
             if (topicLower.includes('kubernetes') || topicLower.includes('k8s')) {
               if (content.includes('problem') || content.includes('issue')) {

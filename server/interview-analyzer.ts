@@ -1,16 +1,14 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { config } from 'dotenv';
+import { getGeminiApiKey, GEMINI_MODEL } from './env.js';
 
-// Load environment variables
-config();
 
 // Initialize Google Generative AI
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_KEY = getGeminiApiKey();
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY || 'dummy-key');
 
 // Configure the model
 const model = genAI.getGenerativeModel({ 
-  model: 'gemini-1.5-flash',
+  model: GEMINI_MODEL,
   generationConfig: {
     temperature: 0.7,
     maxOutputTokens: 2048
@@ -59,7 +57,7 @@ function safeJsonParse(jsonString: string) {
             // Fix the unclosed array
             cleanedJson = cleanedJson.replace(
               /"areas_for_improvement"\s*:\s*\[(.*?)(?=\s*,\s*"|}\s*$)/s,
-              (match, p1) => {
+              (_match, p1) => {
                 // Make sure the array items are properly formatted
                 const fixedItems = p1
                   .split(/",\s*"/)

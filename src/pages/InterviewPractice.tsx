@@ -255,6 +255,9 @@ const InterviewPractice: React.FC = () => {
   const [isComplete, setIsComplete] = useState(false);
   const [showInterview, setShowInterview] = useState(false);
   const [mockSessionId, setMockSessionId] = useState<string | null>(null);
+  // Opaque session snapshot returned by the server so mock interviews survive
+  // serverless (Vercel) cold starts / instance switches.
+  const [mockSessionState, setMockSessionState] = useState<string | null>(null);
 
   // Recording states
   const [isRecording, setIsRecording] = useState(false);
@@ -491,6 +494,7 @@ const InterviewPractice: React.FC = () => {
         });
 
         setMockSessionId(response.data.sessionId);
+        setMockSessionState(response.data.sessionState ?? null);
         setSession({
           currentQuestion: {
             question: response.data.question,
@@ -616,8 +620,13 @@ const InterviewPractice: React.FC = () => {
 
         const turnResponse = await axios.post('/api/mock-interview/turn', {
           sessionId: mockSessionId,
+          sessionState: mockSessionState,
           answer: currentAnswer.trim()
         });
+
+        if (turnResponse.data.sessionState) {
+          setMockSessionState(turnResponse.data.sessionState);
+        }
 
         if (turnResponse.data.done) {
           const mappedAnalysis = buildAgentAnalysis(
