@@ -1,11 +1,9 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { OpenAI } from 'openai';
-import { config } from 'dotenv';
+import { GEMINI_MODEL } from './env.js';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-
-config();
 
 type FocusArea = 'behavioral' | 'technical' | 'case' | 'mixed';
 
@@ -58,11 +56,11 @@ const GEMINI_KEYS = Array.from(
 );
 let geminiKeyIndex = 0;
 const GEMINI_MODEL_CANDIDATES = [
-  process.env.GEMINI_MODEL,
+  GEMINI_MODEL,
+  'gemini-2.5-flash',
   'gemini-2.0-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-8b'
-].filter(Boolean) as string[];
+  'gemini-1.5-flash'
+].filter((m, i, arr) => Boolean(m) && arr.indexOf(m) === i) as string[];
 const OPENROUTER_KEYS = Array.from(
   new Set(
     [
@@ -434,6 +432,35 @@ async function generateCoachingSummary(config: InterviewConfig, history: TurnRec
   }
 }
 
+/**
+ * Serverless platforms (Vercel) don't keep memory between requests, so the session is
+ * also round-tripped to the client as an opaque base64url token (`sessionState`).
+ */
+function encodeSession(session: InterviewSession): string {
+  return Buffer.from(JSON.stringify(session), 'utf-8').toString('base64url');
+}
+
+function decodeSession(token: string | undefined, sessionId: string): InterviewSession | null {
+  if (!token) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(token, 'base64url').toString('utf-8')) as InterviewSession;
+    if (
+      !parsed ||
+      parsed.id !== sessionId ||
+      !parsed.config ||
+      typeof parsed.config.targetRole !== 'string' ||
+      !Array.isArray(parsed.history) ||
+      typeof parsed.nextQuestion !== 'string'
+    ) {
+      return null;
+    }
+    parsed.config.turns = clampTurns(Number(parsed.config.turns));
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export async function startMockInterview(config: {
   targetRole: string;
   background?: string;
@@ -459,6 +486,7 @@ export async function startMockInterview(config: {
 
   return {
     sessionId: session.id,
+    sessionState: encodeSession(session),
     config: session.config,
     question: firstQuestion,
     turnsCompleted: 0,
@@ -466,8 +494,8 @@ export async function startMockInterview(config: {
   };
 }
 
-export async function submitMockInterviewTurn(sessionId: string, answer: string) {
-  const session = sessions.get(sessionId);
+export async function submitMockInterviewTurn(sessionId: string, answer: string, sessionState?: string) {
+  const session = sessions.get(sessionId) || decodeSession(sessionState, sessionId);
   if (!session) {
     throw new Error('Session not found');
   }
@@ -503,6 +531,7 @@ export async function submitMockInterviewTurn(sessionId: string, answer: string)
 
   return {
     done: false,
+    sessionState: encodeSession(session),
     turnsCompleted: session.history.length,
     turnsTotal: session.config.turns,
     turnEvaluation: evaluation,

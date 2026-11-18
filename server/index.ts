@@ -1,82 +1,62 @@
+import { getGeminiApiKey, GEMINI_MODEL } from './env.js';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
-import { config } from 'dotenv';
 import multer from 'multer';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { fileURLToPath } from 'url';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { EventEmitter } from 'events';
-import axios from 'axios';
-import FormData from 'form-data';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-import { Readable } from 'stream';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { GoogleAuth } from 'google-auth-library';
 import { spawn } from 'child_process';
-import { v4 as uuidv4 } from 'uuid';
-import { OpenAI } from 'openai';
-import { generateInterviewQuestions } from './question-generator';
-import { analyzeInterviewAnswers, analyzeInterviewerSkills } from './interview-analyzer';
-import { startMockInterview, submitMockInterviewTurn } from './mock-interview-agents';
+import { generateInterviewQuestions } from './question-generator.js';
+import { analyzeInterviewerSkills } from './interview-analyzer.js';
+import { startMockInterview, submitMockInterviewTurn } from './mock-interview-agents.js';
 
-// Type definitions
-interface Recommendation {
-  detail: string;
-  suggestion: string;
-}
-
-interface AnalysisRecommendations {
-  notable_strengths?: Recommendation[];
-  areas_for_improvement?: Recommendation[];
-}
-
-interface Analysis {
-  recommendations?: AnalysisRecommendations;
-  content_analysis?: {
-    question_quality?: {
-      score: number;
-    };
-  };
-}
-
-// Load environment variables from server directory
-const envPath = path.join(__dirname, '.env');
-console.log('Loading .env from:', envPath);
-config({ path: envPath });
-
-// Set FFmpeg path
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+const __filename = fileURLToPath(import.meta.url);
+const IS_VERCEL = Boolean(process.env.VERCEL);
 
 // Initialize Express app and middleware
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+// Keep uploads in memory: Vercel's filesystem is read-only (except /tmp) and
+// Vercel caps request bodies at ~4.5 MB anyway.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 4 * 1024 * 1024 }
+});
 const analysisProgress = new EventEmitter();
 
 // Configure CORS
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175'],
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:5175',
+    ...(process.env.CORS_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean)
+  ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'api-key', 'X-Request-Source'],
   credentials: true
 }));
 
 // Parse JSON bodies
-app.use(express.json());
+app.use(express.json({ limit: '4mb' }));
 
-// Serve static files from the dist directory after building
-app.use(express.static(path.join(process.cwd(), 'dist')));
+// Serve static files from the dist directory after building (local/self-hosted only;
+// on Vercel the static frontend is served by the CDN)
+if (!IS_VERCEL) {
+  app.use(express.static(path.join(process.cwd(), 'dist')));
+}
 
 // Log all requests
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.path}`, req.body);
+app.use((req, _res, next) => {
+  console.log(`${req.method} ${req.path}`);
   next();
 });
 
 // Validate Gemini API key
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_KEY = getGeminiApiKey();
 if (!GEMINI_API_KEY) {
   console.warn('Warning: Missing Gemini API key. Some features may not work.');
 }
@@ -86,123 +66,75 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY || 'dummy-key');
 
 // Configure the model
 const model = genAI.getGenerativeModel({ 
-  model: 'gemini-1.5-flash',
+  model: GEMINI_MODEL,
   generationConfig: {
     temperature: 0.7,
     maxOutputTokens: 2048
   }
 });
 
-const execAsync = promisify(exec);
+function getLocalWhisperPython(): string | null {
+  if (IS_VERCEL) return null;
+  const candidates = [
+    path.join(process.cwd(), 'whisper-env', 'Scripts', 'python.exe'),
+    path.join(process.cwd(), 'whisper-env', 'bin', 'python')
+  ];
+  return candidates.find((p) => fs.existsSync(p)) || null;
+}
 
-async function convertAudioToWav(inputBuffer: Buffer, mimeType: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    if (!inputBuffer || !(inputBuffer instanceof Buffer)) {
-      reject(new Error('Invalid input: buffer is required'));
-      return;
-    }
-
-    if (!mimeType || typeof mimeType !== 'string') {
-      reject(new Error('Invalid input: mimeType is required'));
-      return;
-    }
-
-    const tempDir = os.tmpdir();
-    const timestamp = Date.now();
-    const inputPath = path.join(tempDir, `input-${timestamp}.${mimeType.split('/')[1] || 'webm'}`);
-    const outputPath = path.join(tempDir, `output-${timestamp}.wav`);
-
-    console.log('Converting audio with parameters:', {
-      inputBufferSize: inputBuffer.length,
-      mimeType,
-      inputPath,
-      outputPath
-    });
-
-    try {
-      // Write input buffer to temporary file
-    fs.writeFileSync(inputPath, inputBuffer);
-      console.log('Input file written successfully');
-
-      // Create FFmpeg command
-      const command = ffmpeg(inputPath)
-      .toFormat('wav')
-        .audioFrequency(16000)
-        .audioChannels(1)
-        .audioBitrate('16k');
-
-      // Add error handlers
-      command.on('start', (commandLine) => {
-        console.log('FFmpeg conversion started with command:', commandLine);
-      });
-
-      command.on('progress', (progress) => {
-        console.log('FFmpeg progress:', progress);
-      });
-
-      command.on('error', (err) => {
-        console.error('FFmpeg error:', err);
-        // Cleanup input file
-        try {
-        fs.unlinkSync(inputPath);
-        } catch (cleanupErr) {
-          console.warn('Failed to cleanup input file:', cleanupErr);
-        }
-        // Cleanup output file if it exists
-        if (fs.existsSync(outputPath)) {
-          try {
-          fs.unlinkSync(outputPath);
-          } catch (cleanupErr) {
-            console.warn('Failed to cleanup output file:', cleanupErr);
-          }
-        }
-        reject(new Error(`Error converting audio: ${err.message}`));
-      });
-
-      command.on('end', () => {
-        console.log('FFmpeg conversion completed');
-        // Verify output file exists and has content
-        if (!fs.existsSync(outputPath)) {
-          reject(new Error('FFmpeg conversion failed: output file not created'));
-          return;
-        }
-
-        const outputStats = fs.statSync(outputPath);
-        if (outputStats.size === 0) {
-          reject(new Error('FFmpeg conversion failed: output file is empty'));
-          return;
-        }
-
-        // Cleanup input file
-        try {
-        fs.unlinkSync(inputPath);
-        } catch (err) {
-          console.warn('Failed to cleanup input file:', err);
-        }
-
-        resolve(outputPath);
-      });
-
-      // Start the conversion
-      command.save(outputPath);
-    } catch (error) {
-      console.error('Error during audio conversion setup:', error);
-      // Cleanup any files that might have been created
-      try {
-        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-      } catch (cleanupErr: unknown) {
-        console.warn('Failed to cleanup files after error:', cleanupErr);
-      }
-      reject(new Error(`Failed to setup audio conversion: ${error instanceof Error ? error.message : 'Unknown error'}`));
-    }
+/**
+ * Hosted transcription via Gemini (works on Vercel: no ffmpeg/Python needed).
+ */
+async function transcribeWithGemini(audio: Buffer, mimeType: string): Promise<{ text: string; words: { word: string; start: number; end: number }[] }> {
+  if (!GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not configured');
+  }
+  const transcriptionModel = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    generationConfig: { temperature: 0, maxOutputTokens: 8192 }
   });
+  const result = await transcriptionModel.generateContent([
+    {
+      inlineData: {
+        data: audio.toString('base64'),
+        mimeType: mimeType === 'audio/mp3' ? 'audio/mpeg' : mimeType || 'audio/mpeg'
+      }
+    },
+    {
+      text: 'Transcribe this audio verbatim. Return ONLY a JSON object (no markdown) of the form ' +
+        '{"text": "full transcript", "segments": [{"text": "segment text", "start": 0.0, "end": 4.2}]} ' +
+        'where start/end are seconds. If there are multiple speakers, prefix each segment text with "Speaker A:", "Speaker B:", etc.'
+    }
+  ]);
+  const raw = result.response.text().replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) {
+    return { text: raw, words: [] };
+  }
+  try {
+    const parsed = JSON.parse(match[0]);
+    const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
+    return {
+      text: typeof parsed.text === 'string' ? parsed.text : segments.map((s: any) => s.text).join(' '),
+      words: segments.map((seg: any) => ({
+        word: String(seg.text ?? ''),
+        start: Number(seg.start) || 0,
+        end: Number(seg.end) || 0
+      }))
+    };
+  } catch {
+    return { text: raw, words: [] };
+  }
 }
 
 async function transcribeWithWhisper(audioPath: string): Promise<{ text: string; words: any[] }> {
   return new Promise((resolve, reject) => {
     // Check if Python environment exists
-    const pythonPath = path.join(process.cwd(), 'whisper-env', 'Scripts', 'python.exe');
+    const pythonPath = getLocalWhisperPython();
+    if (!pythonPath) {
+      reject(new Error('Local Whisper environment not found.'));
+      return;
+    }
     if (!fs.existsSync(pythonPath)) {
       console.error('Python environment not found at:', pythonPath);
       reject(new Error('Whisper environment not properly configured. Please check installation.'));
@@ -235,7 +167,7 @@ try:
     print("Model loaded successfully")
     
     print("Starting transcription...")
-    result = model.transcribe("${audioPath}")
+    result = model.transcribe(${JSON.stringify(audioPath)})
     print("Transcription completed")
     
     print(json.dumps(result))
@@ -469,8 +401,10 @@ IMPORTANT: Do not include any markdown formatting or code block tags. Return onl
 
 app.get('/api/analysis-status', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
 
   const sendUpdate = (status: string) => {
     res.write(`data: ${JSON.stringify({ status })}\n\n`);
@@ -478,9 +412,19 @@ app.get('/api/analysis-status', (req, res) => {
 
   // Listen for progress updates
   analysisProgress.on('update', sendUpdate);
+  sendUpdate('connected');
+
+  // Serverless functions can't hold a connection forever: close the stream
+  // before Vercel's maxDuration so the client can reconnect cleanly.
+  const maxStreamMs = IS_VERCEL ? 50_000 : 10 * 60_000;
+  const timer = setTimeout(() => {
+    analysisProgress.removeListener('update', sendUpdate);
+    res.end();
+  }, maxStreamMs);
 
   // Remove listener when client disconnects
   req.on('close', () => {
+    clearTimeout(timer);
     analysisProgress.removeListener('update', sendUpdate);
   });
 });
@@ -671,12 +615,16 @@ app.post('/api/mock-interview/start', async (req, res) => {
 
 app.post('/api/mock-interview/turn', async (req, res) => {
   try {
-    const { sessionId, answer } = req.body;
+    const { sessionId, answer, sessionState } = req.body;
     if (!sessionId || !answer) {
       return res.status(400).json({ message: 'sessionId and answer are required' });
     }
 
-    const result = await submitMockInterviewTurn(String(sessionId), String(answer));
+    const result = await submitMockInterviewTurn(
+      String(sessionId),
+      String(answer),
+      typeof sessionState === 'string' ? sessionState : undefined
+    );
     return res.json(result);
   } catch (error: any) {
     console.error('Error processing mock interview turn:', error);
@@ -790,7 +738,7 @@ app.post('/api/analyze-interview', async (req, res) => {
           communication_clarity: 0.2,
           problem_solving: 0.1
         },
-        question_by_question_feedback: req.body.answers.map((a: { question: string; answer: string }, i: number) => ({
+        question_by_question_feedback: req.body.answers.map((a: { question: string; answer: string }) => ({
           question: a.question,
           feedback: "No detailed feedback available for this question.",
           strengths: [],
@@ -955,7 +903,7 @@ app.post('/api/analyze-interview', async (req, res) => {
             problem_solving: 0.7
           },
           question_by_question_feedback: analysis.question_by_question_feedback || 
-            req.body.answers.map((a: { question: string; answer: string }, i: number) => ({
+            req.body.answers.map((a: { question: string; answer: string }) => ({
               question: a.question,
               feedback: "No detailed feedback available for this question.",
               strengths: [],
@@ -991,7 +939,7 @@ app.post('/api/analyze-interview', async (req, res) => {
           communication_clarity: 0.5,
           problem_solving: 0.5
         },
-        question_by_question_feedback: req.body.answers.map((a: { question: string; answer: string }, i: number) => ({
+        question_by_question_feedback: req.body.answers.map((a: { question: string; answer: string }) => ({
           question: a.question,
           feedback: "No detailed feedback available for this question.",
           strengths: [],
@@ -1044,57 +992,46 @@ app.post('/api/analyze-interviewer', async (req, res) => {
 });
 
 // Add transcribe endpoint
+// Uses Gemini (hosted) when a key is configured; falls back to a local Python
+// Whisper install for local development. Local Whisper/ffmpeg is never used on Vercel.
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ message: 'No audio file provided' });
+  }
+
+  const { buffer, mimetype, originalname } = req.file;
+
   try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'No audio file provided' });
+    let result: { text: string; words: { word: string; start: number; end: number }[] };
+
+    if (GEMINI_API_KEY) {
+      result = await transcribeWithGemini(buffer, mimetype);
+    } else if (getLocalWhisperPython()) {
+      const ext = path.extname(originalname || '') || '.wav';
+      const tmpPath = path.join(os.tmpdir(), `upload-${Date.now()}${ext}`);
+      fs.writeFileSync(tmpPath, buffer);
+      try {
+        result = await transcribeWithWhisper(tmpPath);
+      } finally {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      }
+    } else {
+      return res.status(503).json({
+        message: 'Server-side transcription is not configured (set GEMINI_API_KEY). The app will fall back to in-browser transcription.'
+      });
     }
 
-    // Get the uploaded file path
-    const audioPath = req.file.path;
-    
-    // Send progress update
-    res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Transfer-Encoding': 'chunked'
-    });
-    
-    try {
-      // Transcribe the audio
-      const result = await transcribeWithWhisper(audioPath);
-      
-      // Format the result
-      const chunks = result.words.map((word: { text: string; start: number; end: number }) => ({
-        text: word.text,
-        start: word.start,
-        end: word.end
-      }));
-      
-      // Send the result
-      res.write(JSON.stringify({
-        text: result.text,
-        chunks: chunks
-      }));
-      res.end();
-      
-      // Clean up the file
-      fs.unlinkSync(audioPath);
-    } catch (error) {
-      console.error('Error transcribing audio:', error);
-      res.write(JSON.stringify({ 
-        message: 'Failed to transcribe audio. Please try again.' 
-      }));
-      res.end();
-      
-      // Clean up the file
-      if (fs.existsSync(audioPath)) {
-        fs.unlinkSync(audioPath);
-      }
-    }
-  } catch (error) {
-    console.error('Error handling transcribe request:', error);
-    res.status(500).json({ 
-      message: 'Server error processing audio. Please try again.' 
+    const chunks = result.words.map((w) => ({
+      text: w.word,
+      start: w.start,
+      end: w.end
+    }));
+
+    return res.json({ text: result.text, chunks });
+  } catch (error: any) {
+    console.error('Error transcribing audio:', error);
+    return res.status(500).json({
+      message: `Failed to transcribe audio: ${error?.message || 'Unknown error'}`
     });
   }
 });
@@ -1110,59 +1047,32 @@ app.post('/api/analyze-resume', upload.single('resume'), async (req, res) => {
 
     // For now, we'll read text files directly
     // For PDF/DOC files, you would need additional libraries like pdf-parse or mammoth
-    const filePath = req.file.path;
     let resumeText = '';
 
-    if (req.file.mimetype === 'text/plain') {
-      resumeText = fs.readFileSync(filePath, 'utf-8');
+    if (req.file.mimetype === 'text/plain' || /\.txt$/i.test(req.file.originalname || '')) {
+      resumeText = req.file.buffer.toString('utf-8');
       console.log('Read text file, length:', resumeText.length);
     } else {
       // For PDF/DOC files, return a message that text extraction is needed
       // In production, you'd use libraries like pdf-parse, mammoth, etc.
-      // Clean up uploaded file
-      try {
-        fs.unlinkSync(filePath);
-      } catch (err) {
-        console.warn('Failed to cleanup file:', err);
-      }
       return res.status(400).json({ 
         message: 'Please upload a text file (.txt) or paste resume text. PDF/DOC parsing coming soon.' 
       });
     }
 
     if (resumeText.trim().length < 50) {
-      // Clean up uploaded file
-      try {
-        fs.unlinkSync(filePath);
-      } catch (err) {
-        console.warn('Failed to cleanup file:', err);
-      }
       return res.status(400).json({ message: 'Resume text is too short. Please provide at least 50 characters.' });
     }
 
     // Analyze the resume text
     const analysis = await analyzeResume(resumeText);
     
-    // Clean up uploaded file
-    try {
-      fs.unlinkSync(filePath);
-    } catch (err) {
-      console.warn('Failed to cleanup file:', err);
-    }
 
     res.json(analysis);
   } catch (error: any) {
     console.error('Error analyzing resume:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     
-    // Clean up uploaded file if it exists
-    if (req.file?.path) {
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (err) {
-        console.warn('Failed to cleanup file:', err);
-      }
-    }
     
     res.status(500).json({ 
       message: errorMessage,
@@ -1209,7 +1119,7 @@ async function analyzeResume(text: string) {
     
     // Use the same model configuration as other endpoints
     const analysisModel = genAI.getGenerativeModel({ 
-      model: 'gemini-1.5-flash',
+      model: GEMINI_MODEL,
       generationConfig: {
         temperature: 0.7,
         maxOutputTokens: 4096
@@ -1283,7 +1193,7 @@ Provide a detailed analysis in the following JSON structure. Return ONLY valid J
 CRITICAL: Return ONLY the JSON object. Do not include any markdown code blocks, explanations, or additional text.`;
 
     console.log('Analyzing resume text, length:', text.length);
-    console.log('Using model: gemini-1.5-flash for resume analysis');
+    console.log(`Using model: ${GEMINI_MODEL} for resume analysis`);
     const result = await analysisModel.generateContent(prompt);
     const response = await result.response;
     let analysisText = response.text();
@@ -1356,30 +1266,52 @@ CRITICAL: Return ONLY the JSON object. Do not include any markdown code blocks, 
   }
 }
 
-// Add the catch-all route at the end
-app.get('*', (_req, res) => {
-  res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
+// Unknown API routes -> JSON 404 (never the SPA HTML)
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ message: `API route not found: ${req.method} ${req.path}` });
 });
 
+// SPA fallback for local/self-hosted use (Vercel serves index.html via vercel.json)
+if (!IS_VERCEL) {
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
+  });
+}
+
 // Error handling middleware
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('Server error:', err);
-  res.status(500).json({
+  const status = (err as any)?.code === 'LIMIT_FILE_SIZE' ? 413 : 500;
+  res.status(status).json({
     message: err.message || 'Internal server error',
     error: process.env.NODE_ENV === 'development' ? err : {}
   });
 });
 
-const port = 4000;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-  console.log('Available endpoints:');
-  console.log('- POST /api/analyze-text');
-  console.log('- POST /api/analyze-interview');
-  console.log('- POST /api/generate-questions');
-  console.log('- POST /api/analyze-resume');
-  console.log('- POST /api/analyze-resume-text');
-}).on('error', (err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+export default app;
+
+// Only start a listening server when this file is run directly (npm run server:dev /
+// server:start). On Vercel the app is exported and invoked by api/index.ts instead.
+const isDirectRun = (() => {
+  try {
+    return Boolean(process.argv[1]) && path.resolve(process.argv[1]).replace(/\.(ts|js)$/, '') === __filename.replace(/\.(ts|js)$/, '');
+  } catch {
+    return false;
+  }
+})();
+
+if (!IS_VERCEL && isDirectRun) {
+  const port = Number(process.env.PORT) || 4000;
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+    console.log('Available endpoints:');
+    console.log('- POST /api/analyze-text');
+    console.log('- POST /api/analyze-interview');
+    console.log('- POST /api/generate-questions');
+    console.log('- POST /api/analyze-resume');
+    console.log('- POST /api/analyze-resume-text');
+  }).on('error', (err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
