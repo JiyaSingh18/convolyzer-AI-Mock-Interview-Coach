@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
-import { getGeminiApiKey, GEMINI_MODEL } from './env.js';
+import { getGeminiApiKey, GEMINI_MODEL, withFastThinking, GEMINI_TIMEOUT_MS, recordGeminiResult, redactSecrets } from './env.js';
 
 // Get the API key from environment variables
 const GEMINI_API_KEY = getGeminiApiKey();
@@ -140,10 +140,15 @@ function createDefaultQuestions(topic: string, role: string, numQuestions: numbe
 
 // Helper to safely generate content with error handling
 async function generateSafely(generationFn: Function) {
+  const started = Date.now();
   try {
-    return await generationFn();
+    const result = await generationFn();
+    recordGeminiResult();
+    console.log(`[generate-questions] Gemini responded in ${Date.now() - started}ms`);
+    return result;
   } catch (error) {
-    console.error("Error during generation:", error);
+    recordGeminiResult(error);
+    console.error(`[generate-questions] Gemini failed after ${Date.now() - started}ms:`, redactSecrets(error instanceof Error ? error.message : String(error)));
     return null;
   }
 }
@@ -180,14 +185,15 @@ export async function generateInterviewQuestions(topic: string, role: string, mo
     }
 
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+    // Bounded timeout so a slow Gemini call falls back to default questions instead of hanging.
+    const model = genAI.getGenerativeModel({ model: MODEL_NAME }, { timeout: GEMINI_TIMEOUT_MS });
 
-    const generationConfig = {
+    const generationConfig = withFastThinking({
       temperature: 0.7,
       topK: 40,
       topP: 0.95,
-      maxOutputTokens: 8192,
-    };
+      maxOutputTokens: 4096,
+    }, MODEL_NAME);
 
     const safetySettings = [
       {

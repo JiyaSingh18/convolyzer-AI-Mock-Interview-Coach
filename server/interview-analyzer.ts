@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { getGeminiApiKey, GEMINI_MODEL } from './env.js';
+import { getGeminiApiKey, GEMINI_MODEL, withFastThinking } from './env.js';
 
 
 // Initialize Google Generative AI
@@ -9,10 +9,10 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY || 'dummy-key');
 // Configure the model
 const model = genAI.getGenerativeModel({ 
   model: GEMINI_MODEL,
-  generationConfig: {
+  generationConfig: withFastThinking({
     temperature: 0.7,
     maxOutputTokens: 2048
-  }
+  })
 });
 
 /**
