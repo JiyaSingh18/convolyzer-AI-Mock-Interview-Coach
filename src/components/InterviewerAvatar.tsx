@@ -141,118 +141,26 @@ const InterviewerAvatar: React.FC<InterviewerAvatarProps> = ({
     <div className="flex flex-col items-center space-y-4">
       {/* Avatar Container */}
       <div className="relative">
-        <div className={`relative transition-all duration-300 ${speaking ? 'scale-105' : 'scale-100'}`}>
-          <svg
-            width="200"
-            height="250"
-            viewBox="0 0 200 250"
-            className="drop-shadow-lg"
-          >
-            {/* Background gradient circle */}
-            <defs>
-              <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#f3f4f6" />
-                <stop offset="100%" stopColor="#e5e7eb" />
-              </linearGradient>
-              <linearGradient id="skinGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#fcd34d" />
-                <stop offset="50%" stopColor="#fbbf24" />
-                <stop offset="100%" stopColor="#f59e0b" />
-              </linearGradient>
-              <linearGradient id="suitGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#1e293b" />
-                <stop offset="100%" stopColor="#0f172a" />
-              </linearGradient>
-              <linearGradient id="hairGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#92400e" />
-                <stop offset="100%" stopColor="#78350f" />
-              </linearGradient>
-            </defs>
-            
-            {/* Background circle with shadow */}
-            <circle cx="120" cy="120" r="95" fill="url(#bgGradient)" stroke="#d1d5db" strokeWidth="2" />
-            <circle cx="120" cy="120" r="95" fill="none" stroke="#9ca3af" strokeWidth="1" opacity="0.3" />
-            
-            {/* Professional Suit - More detailed */}
-            {/* Jacket */}
-            <path d="M 50 150 Q 50 140, 60 135 L 180 135 Q 190 140, 190 150 L 190 240 Q 190 250, 180 250 L 60 250 Q 50 250, 50 240 Z" 
-                  fill="url(#suitGradient)" />
-            
-            {/* Jacket lapels */}
-            <path d="M 70 150 L 100 140 L 120 150 L 140 140 L 170 150" stroke="#374151" strokeWidth="2" fill="none" />
-            
-            {/* Inner jacket */}
-            <rect x="70" y="150" width="100" height="90" fill="#0f172a" rx="2" />
-            
-            {/* Professional Tie */}
-            <polygon points="105,150 120,220 135,150" fill="#dc2626" />
-            <rect x="118" y="150" width="4" height="70" fill="#991b1b" />
-            <polygon points="110,150 120,165 130,150" fill="#b91c1c" />
-            
-            {/* White Shirt Collar */}
-            <path d="M 80 150 L 100 145 L 120 150 L 140 145 L 160 150" stroke="#ffffff" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-            <rect x="80" y="150" width="80" height="25" fill="#ffffff" />
-            <path d="M 100 145 L 100 175" stroke="#e5e7eb" strokeWidth="1" />
-            <path d="M 140 145 L 140 175" stroke="#e5e7eb" strokeWidth="1" />
-            
-            {/* Realistic Head Shape */}
-            <ellipse cx="120" cy="95" rx="42" ry="48" fill="url(#skinGradient)" />
-            
-            {/* Neck */}
-            <rect x="105" y="140" width="30" height="15" fill="url(#skinGradient)" rx="3" />
-            
-            {/* Professional Hair - More realistic */}
-            <path d="M 78 55 Q 75 45, 85 50 Q 95 48, 105 50 Q 115 48, 125 50 Q 135 48, 145 50 Q 155 48, 165 50 Q 175 45, 162 55 Q 160 65, 155 70 Q 150 75, 145 78 Q 140 80, 135 82 Q 130 84, 125 85 Q 120 86, 115 85 Q 110 84, 105 82 Q 100 80, 95 78 Q 90 75, 85 70 Q 80 65, 78 55" 
-                  fill="url(#hairGradient)" />
-            <path d="M 78 55 Q 80 50, 85 52 Q 90 50, 95 52 Q 100 50, 105 52 Q 110 50, 115 52 Q 120 50, 125 52 Q 130 50, 135 52 Q 140 50, 145 52 Q 150 50, 155 52 Q 160 50, 162 55" 
-                  fill="#92400e" opacity="0.7" />
-            
-            {/* Realistic Eyes */}
-            <ellipse cx="105" cy="88" rx="6" ry="8" fill="#ffffff" />
-            <ellipse cx="135" cy="88" rx="6" ry="8" fill="#ffffff" />
-            <circle cx="105" cy="88" r="4" fill="#1e293b" />
-            <circle cx="135" cy="88" r="4" fill="#1e293b" />
-            <circle cx="106" cy="87" r="1.5" fill="#ffffff" />
-            <circle cx="136" cy="87" r="1.5" fill="#ffffff" />
-            
-            {/* Eye animation when speaking */}
+        <div className={`relative transition-all duration-300 ${speaking ? 'scale-105 mb-8' : 'scale-100'}`}>
+          <div className="relative w-[200px] h-[200px]">
             {speaking && (
-              <>
-                <ellipse cx="105" cy="88" rx="4" ry="3" fill="#1e293b" />
-                <ellipse cx="135" cy="88" rx="4" ry="3" fill="#1e293b" />
-              </>
+              <span
+                className="absolute -inset-1 rounded-full bg-blue-400/40 animate-ping"
+                aria-hidden="true"
+              />
             )}
-            
-            {/* Eyebrows */}
-            <path d="M 95 80 Q 100 78, 105 79 Q 110 78, 115 80" stroke="#78350f" strokeWidth="2" fill="none" strokeLinecap="round" />
-            <path d="M 125 80 Q 130 78, 135 79 Q 140 78, 145 80" stroke="#78350f" strokeWidth="2" fill="none" strokeLinecap="round" />
-            
-            {/* Realistic Nose */}
-            <path d="M 120 95 Q 115 100, 118 105 Q 120 103, 122 105 Q 125 100, 120 95" 
-                  fill="#f59e0b" opacity="0.6" />
-            <path d="M 115 100 Q 120 102, 125 100" stroke="#d97706" strokeWidth="1.5" fill="none" />
-            
-            {/* Mouth - animated when speaking */}
-            {speaking ? (
-              <>
-                <ellipse cx="120" cy="110" rx="10" ry="6" fill="#1e293b" />
-                <ellipse cx="120" cy="110" rx="8" ry="4" fill="#dc2626" />
-              </>
-            ) : (
-              <path d="M 110 110 Q 120 113, 130 110" stroke="#1e293b" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-            )}
-            
-            {/* Professional Glasses */}
-            <rect x="90" y="82" width="28" height="14" fill="none" stroke="#1e293b" strokeWidth="2.5" rx="3" />
-            <rect x="122" y="82" width="28" height="14" fill="none" stroke="#1e293b" strokeWidth="2.5" rx="3" />
-            <line x1="118" y1="89" x2="122" y2="89" stroke="#1e293b" strokeWidth="2.5" />
-            <line x1="88" y1="85" x2="85" y2="83" stroke="#1e293b" strokeWidth="2" />
-            <line x1="152" y1="85" x2="155" y2="83" stroke="#1e293b" strokeWidth="2" />
-            
-                {/* Shoulders with more detail */}
-                <ellipse cx="120" cy="240" rx="60" ry="18" fill="url(#suitGradient)" />
-                <ellipse cx="120" cy="240" rx="55" ry="15" fill="#0f172a" />
-          </svg>
+            <img
+              src="/interviewer.jpg"
+              alt="Professional interviewer"
+              width={200}
+              height={200}
+              className={`relative w-[200px] h-[200px] rounded-full object-cover object-center drop-shadow-lg ring-2 transition-all duration-300 ${
+                speaking
+                  ? 'ring-4 ring-blue-400 shadow-[0_0_24px_rgba(96,165,250,0.55)]'
+                  : 'ring-gray-200 dark:ring-gray-600'
+              }`}
+            />
+          </div>
           {speaking && (
             <div className="absolute -bottom-6 left-1/2 transform -translate-x-1/2">
               <div className="flex space-x-2 items-center">
@@ -301,4 +209,3 @@ const InterviewerAvatar: React.FC<InterviewerAvatarProps> = ({
 };
 
 export default InterviewerAvatar;
-
