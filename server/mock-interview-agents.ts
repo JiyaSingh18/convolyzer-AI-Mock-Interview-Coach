@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { OpenAI } from 'openai';
-import { GEMINI_MODEL } from './env.js';
+import { GEMINI_MODEL, GEMINI_TIMEOUT_MS, withFastThinking, recordGeminiResult, redactSecrets } from './env.js';
 import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -55,11 +55,11 @@ const GEMINI_KEYS = Array.from(
   )
 );
 let geminiKeyIndex = 0;
+// gemini-1.5-* is retired (every call to it is a wasted 404 round trip), so it's not in the list.
 const GEMINI_MODEL_CANDIDATES = [
   GEMINI_MODEL,
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash'
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash'
 ].filter((m, i, arr) => Boolean(m) && arr.indexOf(m) === i) as string[];
 const OPENROUTER_KEYS = Array.from(
   new Set(
@@ -172,7 +172,18 @@ function isOpenRouterRetryableError(error: unknown): boolean {
   );
 }
 
-async function generateWithGemini(prompt: string): Promise<string> {
+/**
+ * Total time budget for one LLM step (all keys/models/fallbacks combined). Without this,
+ * a slow model plus serial retries over every key x model (then OpenRouter) could keep the
+ * request open until Vercel's 60s limit, which looked like "loading forever" in the UI.
+ */
+const LLM_DEADLINE_MS = Number(process.env.LLM_DEADLINE_MS) || 8000;
+
+function errMsg(error: unknown): string {
+  return redactSecrets(error instanceof Error ? error.message : String(error));
+}
+
+async function generateWithGemini(prompt: string, deadline: number): Promise<string> {
   if (!hasGemini) {
     throw new Error('No Gemini keys configured');
   }
@@ -182,23 +193,35 @@ async function generateWithGemini(prompt: string): Promise<string> {
     const idx = (geminiKeyIndex + i) % GEMINI_KEYS.length;
     const key = GEMINI_KEYS[idx];
     for (const modelName of GEMINI_MODEL_CANDIDATES) {
+      const remaining = deadline - Date.now();
+      if (remaining < 1000) {
+        throw lastError instanceof Error ? lastError : new Error('Gemini deadline exceeded');
+      }
+      const started = Date.now();
       try {
-        const model = new GoogleGenerativeAI(key).getGenerativeModel({
-          model: modelName,
-          generationConfig: {
-            temperature: 0.5,
-            maxOutputTokens: 2048
-          }
-        });
+        const model = new GoogleGenerativeAI(key).getGenerativeModel(
+          {
+            model: modelName,
+            generationConfig: withFastThinking({
+              temperature: 0.5,
+              maxOutputTokens: 2048
+            }, modelName)
+          },
+          { timeout: Math.min(GEMINI_TIMEOUT_MS, remaining) }
+        );
         const result = await model.generateContent(prompt);
+        const text = result.response.text();
         geminiKeyIndex = idx;
-        return result.response.text();
+        recordGeminiResult();
+        console.log(`[mock-interview] ${modelName} responded in ${Date.now() - started}ms`);
+        return text;
       } catch (error) {
         lastError = error;
-        if (isGeminiRetryableError(error)) {
-          continue;
-        }
-        throw error;
+        recordGeminiResult(error);
+        console.warn(`[mock-interview] ${modelName} failed after ${Date.now() - started}ms: ${errMsg(error)}`);
+        // A bad key fails the same way for every model, so move straight to the next key.
+        if (isGeminiKeyError(error)) break;
+        // Anything else (timeout, overload, quota, model not found): try the next model.
       }
     }
   }
@@ -206,7 +229,7 @@ async function generateWithGemini(prompt: string): Promise<string> {
   throw lastError instanceof Error ? lastError : new Error('All Gemini keys failed');
 }
 
-async function generateWithOpenRouter(prompt: string): Promise<string> {
+async function generateWithOpenRouter(prompt: string, deadline: number): Promise<string> {
   if (OPENROUTER_KEYS.length === 0) {
     throw new Error('No OpenRouter keys configured');
   }
@@ -215,10 +238,17 @@ async function generateWithOpenRouter(prompt: string): Promise<string> {
     const idx = (openRouterKeyIndex + i) % OPENROUTER_KEYS.length;
     const key = OPENROUTER_KEYS[idx];
     for (const model of OPENROUTER_MODEL_CANDIDATES) {
+      const remaining = deadline - Date.now();
+      if (remaining < 1000) {
+        throw lastError instanceof Error ? lastError : new Error('OpenRouter deadline exceeded');
+      }
       try {
         const client = new OpenAI({
           apiKey: key,
-          baseURL: 'https://openrouter.ai/api/v1'
+          baseURL: 'https://openrouter.ai/api/v1',
+          // The SDK defaults to a 10 minute timeout with 2 retries; keep it inside our budget.
+          timeout: remaining,
+          maxRetries: 0
         });
         const completion = await client.chat.completions.create({
           model,
@@ -234,6 +264,7 @@ async function generateWithOpenRouter(prompt: string): Promise<string> {
         return text.trim();
       } catch (error) {
         lastError = error;
+        console.warn(`[mock-interview] OpenRouter ${model} failed: ${errMsg(error)}`);
         if (isOpenRouterRetryableError(error)) continue;
         throw error;
       }
@@ -243,12 +274,16 @@ async function generateWithOpenRouter(prompt: string): Promise<string> {
 }
 
 async function generateWithLLM(prompt: string): Promise<string> {
+  const deadline = Date.now() + LLM_DEADLINE_MS;
   try {
-    return await generateWithGemini(prompt);
+    return await generateWithGemini(prompt, deadline);
   } catch (geminiError) {
+    if (OPENROUTER_KEYS.length === 0 || deadline - Date.now() < 1000) {
+      throw geminiError;
+    }
     try {
       console.warn('[mock-interview] Gemini failed; trying OpenRouter fallback');
-      return await generateWithOpenRouter(prompt);
+      return await generateWithOpenRouter(prompt, deadline);
     } catch (openRouterError) {
       throw openRouterError instanceof Error ? openRouterError : geminiError;
     }
@@ -300,11 +335,9 @@ async function generateInterviewerQuestion(config: InterviewConfig, history: Tur
     }
     return parsed.nextQuestion.trim();
   } catch (error) {
-    if (isGeminiRetryableError(error)) {
-      console.warn('[mock-interview] Gemini unavailable for current keys/models; switching to fallback interviewer questions');
-      return getFallbackQuestion();
-    }
-    throw error;
+    // Never fail the interview because the model is slow, overloaded, or returned bad JSON.
+    console.warn(`[mock-interview] AI step failed (${errMsg(error)}); switching to fallback interviewer questions`);
+    return getFallbackQuestion();
   }
 }
 
@@ -360,11 +393,9 @@ async function evaluateTurn(config: InterviewConfig, question: string, answer: s
     const parsed = parseJson<TurnEvaluation>(text);
     return parsed;
   } catch (error) {
-    if (isGeminiRetryableError(error)) {
-      console.warn('[mock-interview] Gemini unavailable for current keys/models; switching to fallback evaluator');
-      return getFallbackEvaluation();
-    }
-    throw error;
+    // Never fail the interview because the model is slow, overloaded, or returned bad JSON.
+    console.warn(`[mock-interview] AI step failed (${errMsg(error)}); switching to fallback evaluator`);
+    return getFallbackEvaluation();
   }
 }
 
@@ -424,11 +455,9 @@ async function generateCoachingSummary(config: InterviewConfig, history: TurnRec
       finalSummaryMarkdown: string;
     }>(text);
   } catch (error) {
-    if (isGeminiRetryableError(error)) {
-      console.warn('[mock-interview] Gemini unavailable for current keys/models; switching to fallback coach summary');
-      return getFallbackSummary();
-    }
-    throw error;
+    // Never fail the interview because the model is slow, overloaded, or returned bad JSON.
+    console.warn(`[mock-interview] AI step failed (${errMsg(error)}); switching to fallback coach summary`);
+    return getFallbackSummary();
   }
 }
 

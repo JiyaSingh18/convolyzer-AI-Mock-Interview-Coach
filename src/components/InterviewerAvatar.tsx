@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Volume2, VolumeX } from 'lucide-react';
+import { loadVoices, pickBestVoice, speakNaturally } from '@/lib/interviewerVoice';
 
 interface InterviewerAvatarProps {
   question: string;
@@ -16,94 +17,68 @@ const InterviewerAvatar: React.FC<InterviewerAvatarProps> = ({
 }) => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-  const synthRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const speechSynthesisRef = useRef<SpeechSynthesis | null>(null);
+  const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
+  const voicesReadyRef = useRef<Promise<void> | null>(null);
+  const cancelSpeechRef = useRef<(() => void) | null>(null);
+  const onCompleteRef = useRef(onSpeakingComplete);
+  onCompleteRef.current = onSpeakingComplete;
+
+  const hasSpeech = typeof window !== 'undefined' && 'speechSynthesis' in window;
 
   useEffect(() => {
-    speechSynthesisRef.current = window.speechSynthesis;
-    
-    // Load voices (they may not be available immediately)
-    const loadVoices = () => {
-      if (speechSynthesisRef.current) {
-        speechSynthesisRef.current.getVoices();
+    if (!hasSpeech) return;
+    const synth = window.speechSynthesis;
+
+    // Pick the most natural female voice once the browser has loaded its voice list,
+    // and re-pick if the list changes (Chrome loads its Google voices asynchronously).
+    const choose = () => {
+      const best = pickBestVoice(synth.getVoices());
+      if (best && best !== voiceRef.current) {
+        voiceRef.current = best;
+        console.info(`Interviewer voice: ${best.name} (${best.lang}${best.localService ? '' : ', online'})`);
       }
     };
-    
-    loadVoices();
-    // Some browsers load voices asynchronously
-    if (speechSynthesisRef.current.onvoiceschanged !== undefined) {
-      speechSynthesisRef.current.onvoiceschanged = loadVoices;
-    }
-    
+    voicesReadyRef.current = loadVoices().then(choose);
+    synth.addEventListener?.('voiceschanged', choose);
+
     return () => {
-      // Cleanup: stop any ongoing speech when component unmounts
-      if (speechSynthesisRef.current) {
-        speechSynthesisRef.current.cancel();
-      }
+      synth.removeEventListener?.('voiceschanged', choose);
+      cancelSpeechRef.current?.();
     };
+  }, [hasSpeech]);
+
+  const stopSpeaking = useCallback(() => {
+    cancelSpeechRef.current?.();
+    cancelSpeechRef.current = null;
+    setIsSpeaking(false);
   }, []);
 
-  const speakQuestion = useCallback((text: string) => {
-    if (!text || isMuted || !speechSynthesisRef.current) return;
+  const speakQuestion = useCallback(async (text: string) => {
+    if (!text || isMuted || !hasSpeech) return;
+    stopSpeaking();
+    let superseded = false;
+    // Make sure the chosen voice is loaded before the first sentence is spoken.
+    const myCancel = () => { superseded = true; };
+    cancelSpeechRef.current = myCancel;
+    await voicesReadyRef.current;
+    if (superseded || cancelSpeechRef.current !== myCancel) return;
 
-    // Cancel any ongoing speech
-    speechSynthesisRef.current.cancel();
-
-    // Create a new speech utterance
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Configure voice settings for a professional, clear voice
-    utterance.rate = 0.9; // Slightly slower for clarity
-    utterance.pitch = 1.0; // Normal pitch
-    utterance.volume = 1.0; // Full volume
-
-    // Try to find a female voice (professional)
-    const voices = speechSynthesisRef.current.getVoices();
-    const preferredVoices = [
-      'Google UK English Female',
-      'Microsoft Zira - English (United States)',
-      'Microsoft Jenny - English (United States)',
-      'Samantha',
-      'Victoria',
-      'Karen'
-    ];
-    
-    const selectedVoice = voices.find(voice => 
-      preferredVoices.some(pref => voice.name.includes(pref))
-    ) || voices.find(voice => voice.lang.startsWith('en') && voice.name.includes('Female')) 
-      || voices.find(voice => voice.lang.startsWith('en'));
-
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-    }
-
-    // Event handlers
-    utterance.onstart = () => {
-      setIsSpeaking(true);
-    };
-
-    utterance.onend = () => {
-      setIsSpeaking(false);
-      if (onSpeakingComplete) {
-        onSpeakingComplete();
+    cancelSpeechRef.current = speakNaturally(text, voiceRef.current, {
+      onStart: () => setIsSpeaking(true),
+      onEnd: () => {
+        setIsSpeaking(false);
+        onCompleteRef.current?.();
+      },
+      onError: (error) => {
+        console.error('Speech synthesis error:', error);
+        setIsSpeaking(false);
       }
-    };
-
-    utterance.onerror = (error) => {
-      console.error('Speech synthesis error:', error);
-      setIsSpeaking(false);
-    };
-
-    synthRef.current = utterance;
-    speechSynthesisRef.current.speak(utterance);
-  }, [isMuted, onSpeakingComplete]);
+    });
+  }, [isMuted, hasSpeech, stopSpeaking]);
 
   useEffect(() => {
     // Stop any previous speech when question changes
-    if (speechSynthesisRef.current) {
-      speechSynthesisRef.current.cancel();
-      setIsSpeaking(false);
-    }
+    stopSpeaking();
 
     // Auto-play the question if autoPlay is enabled and question exists
     if (autoPlay && question && !isMuted) {
@@ -112,7 +87,7 @@ const InterviewerAvatar: React.FC<InterviewerAvatarProps> = ({
       }, 100);
       return () => clearTimeout(timer);
     }
-  }, [question, autoPlay, isMuted, speakQuestion]);
+  }, [question, autoPlay, isMuted, speakQuestion, stopSpeaking]);
 
   const handleToggleMute = () => {
     if (isMuted) {
@@ -122,10 +97,7 @@ const InterviewerAvatar: React.FC<InterviewerAvatarProps> = ({
       }
     } else {
       setIsMuted(true);
-      if (speechSynthesisRef.current) {
-        speechSynthesisRef.current.cancel();
-        setIsSpeaking(false);
-      }
+      stopSpeaking();
     }
   };
 

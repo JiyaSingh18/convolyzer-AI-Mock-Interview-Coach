@@ -1,4 +1,4 @@
-import { getGeminiApiKey, GEMINI_MODEL } from './env.js';
+import { getGeminiApiKey, getGeminiApiKeys, GEMINI_MODEL, GEMINI_TIMEOUT_MS, withFastThinking, redactSecrets, geminiStatus, recordGeminiResult } from './env.js';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import multer from 'multer';
@@ -67,10 +67,10 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY || 'dummy-key');
 // Configure the model
 const model = genAI.getGenerativeModel({ 
   model: GEMINI_MODEL,
-  generationConfig: {
+  generationConfig: withFastThinking({
     temperature: 0.7,
     maxOutputTokens: 2048
-  }
+  })
 });
 
 function getLocalWhisperPython(): string | null {
@@ -91,7 +91,7 @@ async function transcribeWithGemini(audio: Buffer, mimeType: string): Promise<{ 
   }
   const transcriptionModel = genAI.getGenerativeModel({
     model: GEMINI_MODEL,
-    generationConfig: { temperature: 0, maxOutputTokens: 8192 }
+    generationConfig: withFastThinking({ temperature: 0, maxOutputTokens: 8192 })
   });
   const result = await transcriptionModel.generateContent([
     {
@@ -398,6 +398,37 @@ IMPORTANT: Do not include any markdown formatting or code block tags. Return onl
     throw error;
   }
 }
+
+// Quick diagnostics (never returns key values): is a Gemini key configured, which model,
+// and the last success/error. Add ?probe=1 to make one tiny live Gemini call and time it.
+app.get('/api/health', async (req, res) => {
+  const body: Record<string, unknown> = {
+    ok: true,
+    geminiKeyConfigured: getGeminiApiKeys().length > 0,
+    geminiKeyCount: getGeminiApiKeys().length,
+    model: GEMINI_MODEL,
+    lastGeminiOk: geminiStatus.lastOk,
+    lastGeminiError: geminiStatus.lastError,
+    lastGeminiErrorAt: geminiStatus.lastErrorAt
+  };
+  if (req.query.probe === '1' && GEMINI_API_KEY) {
+    const started = Date.now();
+    try {
+      const probeModel = new GoogleGenerativeAI(GEMINI_API_KEY).getGenerativeModel(
+        { model: GEMINI_MODEL, generationConfig: withFastThinking({ maxOutputTokens: 16 }) },
+        { timeout: GEMINI_TIMEOUT_MS }
+      );
+      const result = await probeModel.generateContent('Reply with the single word: ok');
+      recordGeminiResult();
+      body.probe = { ok: true, ms: Date.now() - started, reply: result.response.text().trim().slice(0, 20) };
+    } catch (error: any) {
+      recordGeminiResult(error);
+      body.probe = { ok: false, ms: Date.now() - started, error: redactSecrets(String(error?.message || error)).slice(0, 300) };
+    }
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(body);
+});
 
 app.get('/api/analysis-status', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1120,10 +1151,10 @@ async function analyzeResume(text: string) {
     // Use the same model configuration as other endpoints
     const analysisModel = genAI.getGenerativeModel({ 
       model: GEMINI_MODEL,
-      generationConfig: {
+      generationConfig: withFastThinking({
         temperature: 0.7,
         maxOutputTokens: 4096
-      }
+      })
     });
     
     const prompt = `You are an expert resume analyst. Analyze the following resume and provide a comprehensive analysis in JSON format.

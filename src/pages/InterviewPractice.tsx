@@ -7,6 +7,21 @@ import { User, Brain, AlertTriangle, Mic, StopCircle, Send, Loader, Loader2, Spa
 import { Button } from '@/components/ui/button';
 import InterviewerAvatar from '@/components/InterviewerAvatar';
 
+// Client-side ceilings so the UI never waits forever. The server caps each AI step at ~8s
+// and falls back to built-in questions, so these only trigger on network trouble.
+const START_TIMEOUT_MS = 25000;
+const TURN_TIMEOUT_MS = 35000;
+
+function describeRequestError(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+      return 'The AI took too long to respond. Please try again.';
+    }
+    return error.response?.data?.message || error.message || fallback;
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
 // Add TypeScript declarations for Web Speech API
 declare global {
   interface Window {
@@ -249,6 +264,7 @@ const InterviewPractice: React.FC = () => {
   // Session states
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [showAnalysis, setShowAnalysis] = useState(false);
   const [analysis, setAnalysis] = useState<any>(null);
@@ -258,6 +274,17 @@ const InterviewPractice: React.FC = () => {
   // Opaque session snapshot returned by the server so mock interviews survive
   // serverless (Vercel) cold starts / instance switches.
   const [mockSessionState, setMockSessionState] = useState<string | null>(null);
+
+  // Elapsed-time counter used to show a reassuring loading message.
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const id = window.setInterval(() => setLoadingSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [isLoading]);
 
   // Recording states
   const [isRecording, setIsRecording] = useState(false);
@@ -491,7 +518,7 @@ const InterviewPractice: React.FC = () => {
           background: candidateBackground,
           focusArea: mode,
           turns
-        });
+        }, { timeout: START_TIMEOUT_MS });
 
         setMockSessionId(response.data.sessionId);
         setMockSessionState(response.data.sessionState ?? null);
@@ -519,7 +546,7 @@ const InterviewPractice: React.FC = () => {
         mode: mode,
         numQuestions: parseInt(numQuestions, 10) || 3,
         context: `This is a ${mode} interview for a ${interviewee} role. Generate ${numQuestions} technical questions appropriate for this format.`
-      });
+      }, { timeout: START_TIMEOUT_MS });
 
       console.log('Generated questions:', response.data);
       
@@ -572,12 +599,7 @@ const InterviewPractice: React.FC = () => {
       setIsLoading(false);
     } catch (error) {
       console.error('Error starting interview:', error);
-      if (axios.isAxiosError(error) && error.response) {
-        // Display the specific error message from the server if available
-        setError(`Failed to generate interview questions: ${error.response.data?.message || error.message}`);
-      } else {
-        setError(`Failed to generate interview questions: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
+      setError(`Failed to generate interview questions: ${describeRequestError(error, 'Unknown error')}`);
       setIsLoading(false);
     }
   };
@@ -622,7 +644,7 @@ const InterviewPractice: React.FC = () => {
           sessionId: mockSessionId,
           sessionState: mockSessionState,
           answer: currentAnswer.trim()
-        });
+        }, { timeout: TURN_TIMEOUT_MS });
 
         if (turnResponse.data.sessionState) {
           setMockSessionState(turnResponse.data.sessionState);
@@ -699,11 +721,7 @@ const InterviewPractice: React.FC = () => {
       }
     } catch (error) {
       console.error('Error during question transition:', error);
-      if (axios.isAxiosError(error)) {
-        setError(error.response?.data?.message || error.message || 'Failed to submit answer.');
-      } else {
-        setError(error instanceof Error ? error.message : 'An error occurred. Please try again.');
-      }
+      setError(describeRequestError(error, 'Failed to submit answer.'));
     } finally {
       setIsFetchingNextQuestion(false);
       setIsLoading(false);
@@ -1694,7 +1712,7 @@ const InterviewPractice: React.FC = () => {
                     {isLoading ? (
                       <div className="flex items-center justify-center">
                         <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                        Generating Questions...
+                        {loadingSeconds < 4 ? 'Preparing your interview…' : 'Your interviewer is getting ready…'}
                       </div>
                     ) : (
                       <>
@@ -1703,6 +1721,13 @@ const InterviewPractice: React.FC = () => {
                       </>
                     )}
                   </button>
+                  {isLoading && (
+                    <p className="mt-3 text-sm text-gray-600 dark:text-gray-400" aria-live="polite">
+                      {loadingSeconds < 6
+                        ? 'Writing your first question with AI. This usually takes a few seconds.'
+                        : 'Almost there. Thanks for waiting.'}
+                    </p>
+                  )}
                 </div>
               </div>
             </form>
